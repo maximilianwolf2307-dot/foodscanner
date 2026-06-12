@@ -95,6 +95,7 @@
   <div class="card" style="background:#E6EFE3">
     <strong>🤖 KI-Unterstützung (Google Gemini)</strong>
     <p class="muted">Mit einem kostenlosen API-Key liest die KI Zutatenlisten direkt vom Foto und ergänzt Schreibvarianten. Key erstellen: aistudio.google.com/apikey — der Key bleibt nur auf diesem Gerät.</p>
+    <p class="muted">📌 iPhone-Tipp: Die Home-Bildschirm-App und Safari speichern getrennt. Profil und Key am besten direkt in der Version eintragen, die du täglich nutzt.</p>
     <div class="row"><input type="text" id="apiKeyInput" placeholder="AIza..."></div>
     <p class="muted" id="apiKeyStatus"></p>
   </div>
@@ -102,11 +103,11 @@
 
 <div id="scannerOverlay" hidden>
   <p class="hint">Barcode in die Bildmitte halten</p>
-  <video id="video" playsinline></video>
+  <video id="video" playsinline muted autoplay></video>
+  <button class="btn btn-outline" id="torchBtn" hidden style="margin:8px 18px 0">🔦 Licht an/aus</button>
   <button class="btn btn-primary" id="cancelScanBtn">Abbrechen</button>
 </div>
 
-<script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
 <script>
 // ----------------------- Daten -----------------------
 const CATALOG = [
@@ -219,23 +220,27 @@ async function lookup(barcode) {
     const r = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(barcode)}.json?lc=de`);
     const j = await r.json();
     if (j.status === 1 && j.product) {
-      const p = j.product;
-      setStatus("");
-      const name = p.product_name_de || p.product_name || "Unbekanntes Produkt";
-      const ingredients = p.ingredients_text_de || p.ingredients_text || "Keine Zutatenliste hinterlegt.";
-      let html = "";
-      if (!hasUsableData(p)) {
-        html += `<div class="result" style="background:var(--grey)"><h3>❓ Keine Allergen-Daten vorhanden</h3>
-          <p>Für dieses Produkt sind in der Datenbank keine verwertbaren Zutaten oder Allergene hinterlegt.
-          Nutze „📝 Zutatenliste fotografieren“, um die Packung direkt zu prüfen.</p></div>`;
-      } else {
-        const text = (p.ingredients_text_de || p.ingredients_text || "");
-        html += renderMatchesCard(runCheck(text, p.allergens_tags || [], p.traces_tags || []));
-      }
-      html += `<div class="card"><strong>${esc(name)}</strong><br><span class="muted">Zutaten:</span><pre>${esc(ingredients)}</pre></div>`;
-      $("resultArea").innerHTML = html;
+      handleFoodProduct(j.product);
     } else {
-      setStatus(`❌ Produkt nicht gefunden (Barcode: ${esc(barcode)}).<br><br>Tipp: Fotografiere stattdessen die Zutatenliste.`);
+      // Schwester-Datenbanken: erkennt zumindest Kosmetik & Non-Food
+      const fallbacks = [
+        ["https://world.openbeautyfacts.org", "Kosmetik-Datenbank"],
+        ["https://world.openproductsfacts.org", "Produkt-Datenbank"],
+      ];
+      let found = false;
+      for (const [base, sourceName] of fallbacks) {
+        try {
+          const r2 = await fetch(`${base}/api/v2/product/${encodeURIComponent(barcode)}.json?lc=de`);
+          const j2 = await r2.json();
+          if (j2.status === 1 && j2.product) {
+            const n = j2.product.product_name_de || j2.product.product_name || "Unbekanntes Produkt";
+            setStatus(`ℹ️ „${esc(n)}“ gefunden (${sourceName}) — das ist kein Lebensmittel bzw. es liegen keine Zutatendaten vor.<br><br>Für den Allergie-Check bitte die Zutatenliste fotografieren.`);
+            found = true;
+            break;
+          }
+        } catch (e) { /* nächste Quelle */ }
+      }
+      if (!found) setStatus(`❌ Produkt in keiner Datenbank gefunden (Barcode: ${esc(barcode)}).<br><br>Tipp: Fotografiere stattdessen die Zutatenliste — das funktioniert bei jedem Produkt.`);
     }
   } catch (e) {
     setStatus("⚠️ Fehler beim Abruf. Ist eine Internetverbindung vorhanden?");
@@ -243,23 +248,91 @@ async function lookup(barcode) {
   setLoading(false);
 }
 
-// ----------------------- Barcode-Scanner (ZXing) -----------------------
-let codeReader = null;
+function handleFoodProduct(p) {
+  setStatus("");
+  const name = p.product_name_de || p.product_name || "Unbekanntes Produkt";
+  const ingredients = p.ingredients_text_de || p.ingredients_text || "Keine Zutatenliste hinterlegt.";
+  let html = "";
+  if (!hasUsableData(p)) {
+    html += `<div class="result" style="background:var(--grey)"><h3>❓ Keine Allergen-Daten vorhanden</h3>
+      <p>Für dieses Produkt sind in der Datenbank keine verwertbaren Zutaten oder Allergene hinterlegt.
+      Nutze „📝 Zutatenliste fotografieren“, um die Packung direkt zu prüfen.</p></div>`;
+  } else {
+    const text = (p.ingredients_text_de || p.ingredients_text || "");
+    html += renderMatchesCard(runCheck(text, p.allergens_tags || [], p.traces_tags || []));
+  }
+  html += `<div class="card"><strong>${esc(name)}</strong><br><span class="muted">Zutaten:</span><pre>${esc(ingredients)}</pre></div>`;
+  $("resultArea").innerHTML = html;
+}
+
+// ----------------------- Barcode-Scanner -----------------------
+// Stufe 1: nativer BarcodeDetector (Chrome/Android, hardwarebeschleunigt).
+// Stufe 2: ZXing-WASM-Polyfill (u. a. iPhone-Safari) — wird erst beim ersten Scan geladen.
+const SCAN_FORMATS = ["ean_13", "ean_8", "upc_a", "upc_e"];
+let detectorClass = null;
+async function getDetectorClass() {
+  if (detectorClass) return detectorClass;
+  if ("BarcodeDetector" in window) {
+    try {
+      const supported = await window.BarcodeDetector.getSupportedFormats();
+      if (supported.includes("ean_13")) { detectorClass = window.BarcodeDetector; return detectorClass; }
+    } catch (e) { /* weiter zum Polyfill */ }
+  }
+  const mod = await import("https://cdn.jsdelivr.net/npm/barcode-detector@3/dist/es/pure.min.js");
+  detectorClass = mod.BarcodeDetector;
+  return detectorClass;
+}
+
+let scanStream = null, scanTimer = null;
 async function startScan() {
   $("resultArea").innerHTML = ""; setStatus("");
   $("scannerOverlay").hidden = false;
-  codeReader = new ZXing.BrowserMultiFormatReader();
   try {
-    await codeReader.decodeFromVideoDevice(undefined, "video", (result) => {
-      if (result) { stopScan(); $("barcodeInput").value = result.getText(); lookup(result.getText()); }
+    const Detector = await getDetectorClass();
+    const detector = new Detector({ formats: SCAN_FORMATS });
+    scanStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false,
     });
+    const video = $("video");
+    video.srcObject = scanStream;
+    await video.play();
+    setupTorch();
+    scanTimer = setInterval(async () => {
+      try {
+        const codes = await detector.detect(video);
+        if (codes.length) {
+          const value = codes[0].rawValue;
+          stopScan();
+          $("barcodeInput").value = value;
+          lookup(value);
+        }
+      } catch (e) { /* einzelne Frames dürfen fehlschlagen */ }
+    }, 120);
   } catch (e) {
     stopScan();
-    setStatus("⚠️ Kamera nicht verfügbar. Bitte Kamera-Zugriff in Safari erlauben (AA-Symbol → Website-Einstellungen) oder den Barcode manuell eingeben.");
+    setStatus("⚠️ Kamera nicht verfügbar. Bitte Kamera-Zugriff erlauben (in Safari: AA-Symbol → Website-Einstellungen) oder den Barcode manuell eingeben.");
   }
 }
+
+function setupTorch() {
+  const track = scanStream && scanStream.getVideoTracks()[0];
+  const caps = track && track.getCapabilities ? track.getCapabilities() : null;
+  const btn = $("torchBtn");
+  if (caps && caps.torch) {
+    let on = false;
+    btn.hidden = false;
+    btn.onclick = () => { on = !on; track.applyConstraints({ advanced: [{ torch: on }] }).catch(() => {}); };
+  } else {
+    btn.hidden = true;
+  }
+}
+
 function stopScan() {
-  if (codeReader) { codeReader.reset(); codeReader = null; }
+  if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
+  if (scanStream) { scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
+  $("video").srcObject = null;
+  $("torchBtn").hidden = true;
   $("scannerOverlay").hidden = true;
 }
 
