@@ -240,7 +240,10 @@ async function lookup(barcode) {
           }
         } catch (e) { /* nächste Quelle */ }
       }
-      if (!found) setStatus(`❌ Produkt in keiner Datenbank gefunden (Barcode: ${esc(barcode)}).<br><br>Tipp: Fotografiere stattdessen die Zutatenliste — das funktioniert bei jedem Produkt.`);
+      if (!found) setStatus(`❌ Produkt in keiner Datenbank gefunden (Barcode: ${esc(barcode)}).<br><br>Tipp: Fotografiere stattdessen die Zutatenliste — das funktioniert bei jedem Produkt.<br>
+        <a class="btn btn-outline" style="margin:12px 0 0;display:block;text-align:center;text-decoration:none"
+           href="https://de.openfoodfacts.org/cgi/product.pl?type=add&code=${encodeURIComponent(barcode)}" target="_blank" rel="noopener">➕ Bei Open Food Facts ergänzen</a>
+        <span class="muted">Öffnet die offizielle Seite — dort mit Fotos beitragen, die Community prüft nach.</span>`);
     }
   } catch (e) {
     setStatus("⚠️ Fehler beim Abruf. Ist eine Internetverbindung vorhanden?");
