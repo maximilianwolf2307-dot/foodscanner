@@ -68,6 +68,7 @@
   <button class="btn btn-primary" id="scanBtn">📷&nbsp; Barcode scannen</button>
   <button class="btn btn-outline" id="photoBtn">📝&nbsp; Zutatenliste fotografieren</button>
   <input type="file" id="photoInput" accept="image/*" capture="environment" hidden>
+  <input type="file" id="barcodePhotoInput" accept="image/*" capture="environment" hidden>
   <div class="row">
     <input type="tel" id="barcodeInput" placeholder="Barcode manuell, z. B. 4017100370007">
     <button class="btn btn-outline" style="width:auto;margin:0" id="lookupBtn">🔍</button>
@@ -314,7 +315,47 @@ async function startScan() {
     }, 120);
   } catch (e) {
     stopScan();
-    setStatus("⚠️ Kamera nicht verfügbar. Bitte Kamera-Zugriff erlauben (in Safari: AA-Symbol → Website-Einstellungen) oder den Barcode manuell eingeben.");
+    showScanFallback(e);
+  }
+}
+
+// Wird gezeigt, wenn der Live-Scanner nicht startet (häufig bei iPhone-Home-Bildschirm-Apps).
+function showScanFallback(err) {
+  let reason;
+  if (err && err.name === "NotAllowedError") {
+    reason = "Der Kamera-Zugriff wurde abgelehnt. In Safari: „AA“-Symbol in der Adressleiste → Website-Einstellungen → Kamera „Erlauben“.";
+  } else if (err && err.name === "NotFoundError") {
+    reason = "Es wurde keine Kamera gefunden.";
+  } else if (!window.isSecureContext) {
+    reason = "Die Live-Kamera braucht eine sichere (https) Verbindung.";
+  } else {
+    reason = "Der Live-Scanner ist auf diesem Gerät nicht verfügbar (z. B. bei Home-Bildschirm-Apps auf dem iPhone).";
+  }
+  setStatus(`⚠️ ${reason}<br><br>Du kannst den Barcode stattdessen einfach abfotografieren:
+    <button class="btn btn-primary" style="margin:12px 0 0" onclick="document.getElementById('barcodePhotoInput').click()">📷 Barcode abfotografieren</button>
+    <span class="muted">Oder den Barcode unten manuell eintippen.</span>`);
+}
+
+// Barcode aus einem aufgenommenen Foto lesen (Fallback ohne Live-Kamera).
+async function decodeBarcodeFromFile(file) {
+  setLoading(true); setStatus("Lese Barcode aus dem Foto ...");
+  try {
+    const Detector = await getDetectorClass();
+    const detector = new Detector({ formats: SCAN_FORMATS });
+    const bitmap = await createImageBitmap(file);
+    const codes = await detector.detect(bitmap);
+    bitmap.close && bitmap.close();
+    if (codes.length) {
+      setLoading(false);
+      $("barcodeInput").value = codes[0].rawValue;
+      lookup(codes[0].rawValue);
+    } else {
+      setLoading(false);
+      setStatus(`⚠️ Auf dem Foto war kein Barcode erkennbar. Bitte den Strichcode formatfüllend, scharf und gut beleuchtet fotografieren — oder die Nummer unter dem Strichcode manuell eintippen.`);
+    }
+  } catch (e) {
+    setLoading(false);
+    setStatus("⚠️ Das Foto konnte nicht ausgewertet werden. Bitte den Barcode manuell eintippen.");
   }
 }
 
@@ -504,6 +545,7 @@ $("lookupBtn").onclick = () => lookup($("barcodeInput").value);
 $("barcodeInput").addEventListener("keydown", e => { if (e.key === "Enter") lookup(e.target.value); });
 $("photoBtn").onclick = () => $("photoInput").click();
 $("photoInput").onchange = e => { if (e.target.files[0]) photoSelected(e.target.files[0]); e.target.value = ""; };
+$("barcodePhotoInput").onchange = e => { if (e.target.files[0]) decodeBarcodeFromFile(e.target.files[0]); e.target.value = ""; };
 $("addCustomBtn").onclick = addCustom;
 $("apiKeyInput").addEventListener("input", e => {
   const cleaned = sanitizeApiKey(e.target.value);
