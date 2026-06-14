@@ -52,6 +52,17 @@
   .del { background: none; border: none; font-size: 1.1rem; cursor: pointer; float: right; }
   [hidden] { display: none !important; }
   pre { white-space: pre-wrap; font-family: inherit; font-size: .82rem; margin: 6px 0 0; }
+  #disclaimerOverlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 100; display: flex; align-items: center; justify-content: center; padding: 20px; }
+  .disclaimer-box { background: #fff; border-radius: 18px; padding: 22px; max-width: 460px; border-top: 8px solid var(--red); max-height: 90vh; overflow-y: auto; }
+  .disclaimer-box h2 { margin: 0 0 12px; color: var(--red); }
+  .disclaimer-box ul { padding-left: 20px; margin: 10px 0; }
+  .disclaimer-box li { margin: 7px 0; }
+  .hist-item { display: flex; align-items: center; gap: 10px; background: #fff; border-radius: 12px; padding: 12px; margin-bottom: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .hist-dot { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; }
+  .hist-main { flex: 1; min-width: 0; cursor: pointer; }
+  .hist-main strong { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hist-star { background: none; border: none; font-size: 1.3rem; cursor: pointer; padding: 4px; }
+  .empty { color: var(--muted); font-size: .9rem; padding: 8px 2px; }
 </style>
 </head>
 <body>
@@ -61,7 +72,10 @@
     <h1>🥗 FoodScanner</h1>
     <p>Scannen. Prüfen. Sicher essen.</p>
   </div>
-  <button id="navBtn" title="Allergie-Profil">👤</button>
+  <div style="display:flex;gap:8px">
+    <button id="historyBtn" title="Verlauf & Favoriten">🕒</button>
+    <button id="navBtn" title="Allergie-Profil">👤</button>
+  </div>
 </header>
 
 <main id="scanView">
@@ -103,6 +117,27 @@
   </div>
 </main>
 
+<main id="historyView" hidden>
+  <button class="btn btn-outline" id="histBackBtn">← Zurück zum Scanner</button>
+  <div id="favSection"></div>
+  <div class="section-title">🕒 Zuletzt geprüft</div>
+  <div id="historyList"></div>
+</main>
+
+<div id="disclaimerOverlay" hidden>
+  <div class="disclaimer-box">
+    <h2>⚠️ Bitte zuerst lesen</h2>
+    <p><strong>FoodScanner ist eine Hilfe — kein Ersatz fürs Etikett.</strong></p>
+    <ul>
+      <li>Die Produktdaten stammen aus einer offenen Datenbank und können <strong>unvollständig oder falsch</strong> sein.</li>
+      <li>Auch die Foto- und KI-Erkennung kann Fehler machen.</li>
+      <li>Bei einer Allergie kann ein einziger Fehler <strong>gefährlich</strong> sein.</li>
+    </ul>
+    <p><strong>Verlasse dich niemals allein auf diese App. Prüfe immer zusätzlich die Verpackung — besonders bei schweren Allergien.</strong></p>
+    <button class="btn btn-primary" id="acceptDisclaimerBtn">Verstanden — ich prüfe immer selbst</button>
+  </div>
+</div>
+
 <div id="scannerOverlay" hidden>
   <p class="hint">Barcode in die Bildmitte halten</p>
   <video id="video" playsinline muted autoplay></video>
@@ -114,21 +149,22 @@
 <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
 <script>
 // ----------------------- Daten -----------------------
+// Stichwortlisten bewusst breit (versteckte Namen, Synonyme, Fachbegriffe).
 const CATALOG = [
-  { id:"gluten", name:"Gluten", emoji:"🌾", tags:["en:gluten"], keywords:["gluten","weizen","gerste","roggen","dinkel","hafer","kamut"] },
-  { id:"milk", name:"Milch / Laktose", emoji:"🥛", tags:["en:milk"], keywords:["milch","laktose","lactose","molke","butter","sahne","rahm","käse","joghurt","quark"] },
-  { id:"eggs", name:"Ei", emoji:"🥚", tags:["en:eggs"], keywords:["eier","hühnerei","vollei","eigelb","eiklar","eipulver","eiweißpulver"] },
-  { id:"peanuts", name:"Erdnüsse", emoji:"🥜", tags:["en:peanuts"], keywords:["erdnuss","erdnüsse"] },
-  { id:"nuts", name:"Schalenfrüchte (Nüsse)", emoji:"🌰", tags:["en:nuts"], keywords:["haselnuss","haselnüsse","mandel","walnuss","walnüsse","cashew","pistazie","macadamia","pekannuss","paranuss","paranüsse"] },
-  { id:"soy", name:"Soja", emoji:"🫘", tags:["en:soybeans"], keywords:["soja"] },
-  { id:"fish", name:"Fisch", emoji:"🐟", tags:["en:fish"], keywords:["fisch","lachs","thunfisch","kabeljau","hering","sardelle","anchovis"] },
-  { id:"crustaceans", name:"Krebstiere", emoji:"🦐", tags:["en:crustaceans"], keywords:["krebstier","garnele","shrimp","krabbe","hummer","languste"] },
-  { id:"molluscs", name:"Weichtiere", emoji:"🦪", tags:["en:molluscs"], keywords:["muschel","tintenfisch","kalmar","auster","schnecke"] },
-  { id:"celery", name:"Sellerie", emoji:"🥬", tags:["en:celery"], keywords:["sellerie"] },
-  { id:"mustard", name:"Senf", emoji:"🟡", tags:["en:mustard"], keywords:["senf"] },
-  { id:"sesame", name:"Sesam", emoji:"⚪", tags:["en:sesame-seeds"], keywords:["sesam"] },
-  { id:"sulphites", name:"Schwefeldioxid / Sulfite", emoji:"🧪", tags:["en:sulphur-dioxide-and-sulphites"], keywords:["sulfit","schwefeldioxid","e220","e221","e222","e223","e224","e226","e227","e228"] },
-  { id:"lupin", name:"Lupinen", emoji:"🌸", tags:["en:lupin"], keywords:["lupine","lupinen"] },
+  { id:"gluten", name:"Gluten", emoji:"🌾", tags:["en:gluten"], keywords:["gluten","weizen","gerste","roggen","dinkel","hafer","kamut","malz","seitan","grieß","bulgur","couscous","einkorn","emmer","triticale","graham","paniermehl","semmelbrösel","panko","kleber"] },
+  { id:"milk", name:"Milch / Laktose", emoji:"🥛", tags:["en:milk"], keywords:["milch","laktose","lactose","molke","butter","sahne","rahm","käse","joghurt","quark","kasein","casein","kaseinat","caseinat","laktalbumin","lactalbumin","laktoglobulin","schmand","kefir","mascarpone","ricotta","mozzarella","parmesan","gouda","feta","camembert","cheddar","emmentaler"], excl:["kakaobutter","sheabutter","kokosbutter","erdnussbutter","mandelbutter","cashewbutter","nussbutter","sonnenblumenbutter","samenbutter"] },
+  { id:"eggs", name:"Ei", emoji:"🥚", tags:["en:eggs"], keywords:["eier","hühnerei","vollei","eigelb","eiklar","eipulver","eiweißpulver","ovalbumin","ovomucin","ovomucoid","lysozym","trockenei"] },
+  { id:"peanuts", name:"Erdnüsse", emoji:"🥜", tags:["en:peanuts"], keywords:["erdnuss","erdnüsse","arachis"] },
+  { id:"nuts", name:"Schalenfrüchte (Nüsse)", emoji:"🌰", tags:["en:nuts"], keywords:["haselnuss","haselnüsse","mandel","walnuss","walnüsse","cashew","pistazie","macadamia","pekannuss","pekannüsse","pecannuss","pecannüsse","paranuss","paranüsse","marzipan","persipan","nougat","krokant"] },
+  { id:"soy", name:"Soja", emoji:"🫘", tags:["en:soybeans"], keywords:["soja","tofu","tempeh","edamame","miso"] },
+  { id:"fish", name:"Fisch", emoji:"🐟", tags:["en:fish"], keywords:["fisch","lachs","thunfisch","kabeljau","hering","sardelle","anchovis","sardine","makrele","forelle","scholle","dorsch","seehecht","surimi","pangasius","tilapia","rotbarsch"] },
+  { id:"crustaceans", name:"Krebstiere", emoji:"🦐", tags:["en:crustaceans"], keywords:["krebstier","garnele","shrimp","krabbe","hummer","languste","scampi","krevette","krill","flusskrebs"] },
+  { id:"molluscs", name:"Weichtiere", emoji:"🦪", tags:["en:molluscs"], keywords:["muschel","tintenfisch","kalmar","auster","schnecke","calamari","oktopus","krake","sepia","abalone"] },
+  { id:"celery", name:"Sellerie", emoji:"🥬", tags:["en:celery"], keywords:["sellerie","celery"] },
+  { id:"mustard", name:"Senf", emoji:"🟡", tags:["en:mustard"], keywords:["senf","mustard"] },
+  { id:"sesame", name:"Sesam", emoji:"⚪", tags:["en:sesame-seeds"], keywords:["sesam","tahin","gomasio"] },
+  { id:"sulphites", name:"Schwefeldioxid / Sulfite", emoji:"🧪", tags:["en:sulphur-dioxide-and-sulphites"], keywords:["sulfit","schwefeldioxid","e220","e221","e222","e223","e224","e226","e227","e228","geschwefelt"] },
+  { id:"lupin", name:"Lupinen", emoji:"🌸", tags:["en:lupin"], keywords:["lupine","lupinen","lupin"] },
 ];
 const SEVERITIES = [
   { id:"UNVERTRAEGLICHKEIT", label:"Unverträglichkeit", short:"Unverträgl.", color:"#F9A825", rank:0 },
@@ -146,8 +182,38 @@ const store = {
   set customs(v) { localStorage.setItem("customs", JSON.stringify(v)); },
   get apiKey() { return localStorage.getItem("geminiKey") || ""; },
   set apiKey(v) { localStorage.setItem("geminiKey", v); },
+  get history() { return JSON.parse(localStorage.getItem("history") || "[]"); },
+  set history(v) { localStorage.setItem("history", JSON.stringify(v)); },
+  get disclaimerOK() { return localStorage.getItem("disclaimerOK") === "1"; },
+  set disclaimerOK(v) { localStorage.setItem("disclaimerOK", v ? "1" : "0"); },
 };
 let newSeverity = "ALLERGIE";
+
+// ----------------------- Status & Verlauf -----------------------
+const STATUS = {
+  danger:   { dot: "#C62828", label: "Enthält deine Allergene" },
+  trace:    { dot: "#F9A825", label: "Kann Spuren enthalten" },
+  ok:       { dot: "#2E7D32", label: "Unbedenklich" },
+  nodata:   { dot: "#616161", label: "Keine Allergen-Daten" },
+  noprofile:{ dot: "#9BA897", label: "Kein Profil hinterlegt" },
+};
+
+function productStatus(p) {
+  if (!hasUsableData(p)) return "nodata";
+  if (!hasAnyAllergy()) return "noprofile";
+  const matches = runCheck(p.ingredients_text_de || p.ingredients_text || "", p.allergens_tags || [], p.traces_tags || []);
+  if (!matches.length) return "ok";
+  return matches.some(m => !m.onlyTraces) ? "danger" : "trace";
+}
+
+function addToHistory(code, name, status) {
+  if (!code) return;
+  const list = store.history;
+  const existing = list.find(e => e.code === code);
+  const fav = existing ? existing.fav : false;
+  const rest = list.filter(e => e.code !== code);
+  store.history = [{ code, name, status, fav, ts: Date.now() }, ...rest].slice(0, 50);
+}
 
 // ----------------------- Prüf-Logik -----------------------
 function splitTraces(text) {
@@ -166,8 +232,11 @@ function runCheck(text, allergenTags, tracesTags) {
   for (const def of CATALOG) {
     const severity = profile[def.id];
     if (!severity) continue;
-    const keywordInMain = def.keywords.some(k => mainText.includes(k));
-    const keywordInTrace = def.keywords.some(k => traceText.includes(k));
+    // Ausschluss-Komposita (z. B. "kakaobutter") vor der Stichwortsuche entfernen
+    const cleanedMain = (def.excl || []).reduce((acc, ex) => acc.split(ex).join(" "), mainText);
+    const cleanedTrace = (def.excl || []).reduce((acc, ex) => acc.split(ex).join(" "), traceText);
+    const keywordInMain = def.keywords.some(k => cleanedMain.includes(k));
+    const keywordInTrace = def.keywords.some(k => cleanedTrace.includes(k));
     const tagInAllergens = def.tags.some(t => allergenTags.includes(t));
     const tagInTraces = def.tags.some(t => tracesTags.includes(t));
     // Zutatentext hat Vorrang vor den OFF-Tags (die Spuren teils auch als Allergen listen)
@@ -273,8 +342,18 @@ function handleFoodProduct(p) {
     const text = (p.ingredients_text_de || p.ingredients_text || "");
     html += renderMatchesCard(runCheck(text, p.allergens_tags || [], p.traces_tags || []));
   }
+  const code = p.code || p._id || "";
   html += `<div class="card"><strong>${esc(name)}</strong><br><span class="muted">Zutaten:</span><pre>${esc(ingredients)}</pre></div>`;
+  if (code) {
+    const isFav = store.history.some(e => e.code === code && e.fav);
+    html += `<button class="btn btn-outline" id="favProductBtn" data-code="${esc(code)}" data-name="${esc(name)}">${isFav ? "⭐ In Favoriten" : "☆ Zu Favoriten hinzufügen"}</button>`;
+  }
   $("resultArea").innerHTML = html;
+  if (code) {
+    addToHistory(code, name, productStatus(p));
+    const btn = $("favProductBtn");
+    if (btn) btn.onclick = () => { toggleFav(code); btn.textContent = store.history.some(e => e.code === code && e.fav) ? "⭐ In Favoriten" : "☆ Zu Favoriten hinzufügen"; };
+  }
 }
 
 // ----------------------- Barcode-Scanner -----------------------
@@ -489,8 +568,48 @@ function downscaleToJpegBase64(file, maxDim) {
 }
 
 // ----------------------- Profil-Ansicht -----------------------
-function showProfile() { $("scanView").hidden = true; $("profileView").hidden = false; renderProfile(); }
-function showScanner() { $("profileView").hidden = true; $("scanView").hidden = false; }
+function showProfile() { hideAllViews(); $("profileView").hidden = false; renderProfile(); }
+function showScanner() { hideAllViews(); $("scanView").hidden = false; }
+function showHistory() { hideAllViews(); $("historyView").hidden = false; renderHistory(); }
+function hideAllViews() { $("scanView").hidden = true; $("profileView").hidden = true; $("historyView").hidden = true; }
+
+// ----------------------- Verlauf & Favoriten -----------------------
+function toggleFav(code) {
+  store.history = store.history.map(e => e.code === code ? { ...e, fav: !e.fav } : e);
+}
+function removeHist(code) {
+  store.history = store.history.filter(e => e.code !== code);
+}
+function checkFromHistory(code) {
+  showScanner();
+  $("barcodeInput").value = code;
+  lookup(code);
+}
+
+function histItemHtml(e) {
+  const st = STATUS[e.status] || STATUS.noprofile;
+  return `<div class="hist-item">
+    <span class="hist-dot" style="background:${st.dot}"></span>
+    <div class="hist-main" onclick="checkFromHistory('${esc(e.code)}')">
+      <strong>${esc(e.name || "Unbekanntes Produkt")}</strong>
+      <span class="muted">${st.label}</span>
+    </div>
+    <button class="hist-star" title="Favorit" onclick="toggleFav('${esc(e.code)}');renderHistory()">${e.fav ? "⭐" : "☆"}</button>
+    <button class="hist-star" title="Entfernen" onclick="removeHist('${esc(e.code)}');renderHistory()">🗑️</button>
+  </div>`;
+}
+
+function renderHistory() {
+  const list = store.history;
+  const favs = list.filter(e => e.fav);
+  const recents = list.filter(e => !e.fav);
+  $("favSection").innerHTML = favs.length
+    ? `<div class="section-title">⭐ Favoriten</div>` + favs.map(histItemHtml).join("")
+    : "";
+  $("historyList").innerHTML = recents.length
+    ? recents.map(histItemHtml).join("")
+    : `<p class="empty">Noch keine Produkte geprüft. Gescannte Produkte erscheinen hier automatisch.</p>`;
+}
 
 function severityChips(selected, onPick, includeNone) {
   const wrap = document.createElement("div");
@@ -585,6 +704,9 @@ async function addCustom() {
 // ----------------------- Events -----------------------
 $("navBtn").onclick = showProfile;
 $("backBtn").onclick = showScanner;
+$("historyBtn").onclick = showHistory;
+$("histBackBtn").onclick = showScanner;
+$("acceptDisclaimerBtn").onclick = () => { store.disclaimerOK = true; $("disclaimerOverlay").hidden = true; };
 $("scanBtn").onclick = startScan;
 $("cancelScanBtn").onclick = stopScan;
 $("lookupBtn").onclick = () => lookup($("barcodeInput").value);
@@ -601,6 +723,7 @@ $("apiKeyInput").addEventListener("input", e => {
 });
 
 setStatus("Bereit zum Scannen...");
+if (!store.disclaimerOK) $("disclaimerOverlay").hidden = false;
 </script>
 </body>
 </html>
