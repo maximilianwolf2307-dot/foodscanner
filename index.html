@@ -374,32 +374,73 @@ async function getDetectorClass() {
   return detectorClass;
 }
 
-let scanStream = null, scanTimer = null;
+let scanStream = null, scanTimer = null, zxingReader = null;
+
+function onScanned(value) {
+  stopScan();
+  $("barcodeInput").value = value;
+  lookup(value);
+}
+
 async function startScan() {
   $("resultArea").innerHTML = ""; setStatus("");
   $("scannerOverlay").hidden = false;
+
+  // Pfad A: nativer BarcodeDetector (v. a. Android Chrome) — schnell, mit Taschenlampe
+  let nativeDetector = null;
+  if ("BarcodeDetector" in window) {
+    try {
+      const sup = await window.BarcodeDetector.getSupportedFormats();
+      if (sup.includes("ean_13")) nativeDetector = new window.BarcodeDetector({ formats: SCAN_FORMATS });
+    } catch (e) { /* kein nutzbares natives API */ }
+  }
+  if (nativeDetector) {
+    try {
+      scanStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false,
+      });
+      const video = $("video");
+      video.srcObject = scanStream;
+      await video.play();
+      setupTorch();
+      scanTimer = setInterval(async () => {
+        try {
+          const codes = await nativeDetector.detect(video);
+          if (codes.length) onScanned(codes[0].rawValue);
+        } catch (e) { /* einzelne Frames dürfen fehlschlagen */ }
+      }, 120);
+      return;
+    } catch (e) { stopScan(); showScanFallback(e); return; }
+  }
+
+  // Pfad B: ZXing (bewährt auf iPhone-Safari) — verwaltet Kamera & Decoding selbst
+  if (window.ZXing) {
+    try {
+      zxingReader = new ZXing.BrowserMultiFormatReader();
+      await zxingReader.decodeFromConstraints(
+        { video: { facingMode: { ideal: "environment" } }, audio: false },
+        "video",
+        (result) => { if (result) onScanned(result.getText()); }
+      );
+      return;
+    } catch (e) { stopScan(); showScanFallback(e); return; }
+  }
+
+  // Pfad C: WASM-Polyfill als letzte Möglichkeit
   try {
     const Detector = await getDetectorClass();
     const detector = new Detector({ formats: SCAN_FORMATS });
     scanStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-      audio: false,
+      video: { facingMode: { ideal: "environment" } }, audio: false,
     });
     const video = $("video");
     video.srcObject = scanStream;
     await video.play();
-    setupTorch();
     scanTimer = setInterval(async () => {
-      try {
-        const codes = await detector.detect(video);
-        if (codes.length) {
-          const value = codes[0].rawValue;
-          stopScan();
-          $("barcodeInput").value = value;
-          lookup(value);
-        }
-      } catch (e) { /* einzelne Frames dürfen fehlschlagen */ }
-    }, 120);
+      try { const codes = await detector.detect(video); if (codes.length) onScanned(codes[0].rawValue); }
+      catch (e) { /* Frame übersprungen */ }
+    }, 150);
   } catch (e) {
     stopScan();
     showScanFallback(e);
@@ -438,20 +479,30 @@ async function decodeBarcodeFromFile(file) {
     return;
   }
 
-  // Versuch 1: BarcodeDetector / WASM-Polyfill (genau, schnell) auf einem Canvas
-  try {
-    const Detector = await getDetectorClass();
-    const detector = new Detector({ formats: SCAN_FORMATS });
-    const codes = await detector.detect(imageToCanvas(img, 1600));
-    if (codes.length) { foundBarcode(img, codes[0].rawValue); return; }
-  } catch (e) { /* Versuch 2 */ }
+  // Versuch 1: nativer BarcodeDetector (v. a. Android Chrome)
+  if ("BarcodeDetector" in window) {
+    try {
+      const sup = await window.BarcodeDetector.getSupportedFormats();
+      if (sup.includes("ean_13")) {
+        const codes = await new window.BarcodeDetector({ formats: SCAN_FORMATS }).detect(imageToCanvas(img, 1600));
+        if (codes.length) { foundBarcode(img, codes[0].rawValue); return; }
+      }
+    } catch (e) { /* Versuch 2 */ }
+  }
 
-  // Versuch 2: ZXing pure-JS (sehr breit kompatibel, u. a. ältere iPhones)
-  try {
-    if (window.ZXing) {
+  // Versuch 2: ZXing pure-JS (bewährt auf iPhone, kein WASM nötig)
+  if (window.ZXing) {
+    try {
       const result = await new ZXing.BrowserMultiFormatReader().decodeFromImageElement(img);
       if (result) { foundBarcode(img, result.getText()); return; }
-    }
+    } catch (e) { /* nichts gefunden */ }
+  }
+
+  // Versuch 3: WASM-Polyfill als letzte Möglichkeit
+  try {
+    const Detector = await getDetectorClass();
+    const codes = await new Detector({ formats: SCAN_FORMATS }).detect(imageToCanvas(img, 1600));
+    if (codes.length) { foundBarcode(img, codes[0].rawValue); return; }
   } catch (e) { /* nichts gefunden */ }
 
   URL.revokeObjectURL(img.src);
@@ -499,6 +550,7 @@ function setupTorch() {
 
 function stopScan() {
   if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
+  if (zxingReader) { try { zxingReader.reset(); } catch (e) {} zxingReader = null; }
   if (scanStream) { scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
   $("video").srcObject = null;
   $("torchBtn").hidden = true;
