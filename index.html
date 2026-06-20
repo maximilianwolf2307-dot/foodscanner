@@ -90,7 +90,7 @@
   <div id="spinner" class="spinner" hidden></div>
   <div id="status" class="card" hidden></div>
   <div id="resultArea"></div>
-  <p class="muted" style="text-align:center;margin-top:28px">FoodScanner v1.3 · 14.06.2026</p>
+  <p class="muted" style="text-align:center;margin-top:28px">FoodScanner v1.5 · 17.06.2026</p>
 </main>
 
 <main id="profileView" hidden>
@@ -267,6 +267,45 @@ function hasAnyAllergy() {
   return Object.keys(store.profile).length > 0 || store.customs.length > 0;
 }
 
+// Grobe Heuristik: deutscher Zutatentext? Dann ist die KI-Übersetzung unnötig.
+// Bewusst konservativ: im Zweifel "nicht deutsch" -> KI prüft zusätzlich.
+function looksGerman(text) {
+  const t = (text || "").toLowerCase();
+  const markers = ["zutaten","kann spuren","enthält","zucker","salz","wasser","milch",
+    "weizen","mehl","kakao","stärke","aroma","öl","butter","hefe","gewürze",
+    "säuerungsmittel","emulgator","vollmilch","haselnüsse"," und "];
+  return markers.filter(m => t.includes(m)).length >= 2;
+}
+
+// Alle Allergene des Nutzers (Standard + eigene) als {name, emoji, severity}.
+function profileAllergens() {
+  const profile = store.profile;
+  const std = CATALOG.filter(d => profile[d.id]).map(d => ({ name: d.name, emoji: d.emoji, severity: profile[d.id] }));
+  const own = store.customs.map(c => ({ name: c.name, emoji: "❗", severity: c.severity }));
+  return [...std, ...own];
+}
+
+// KI-Befunde zurück in Treffer-Objekte (Schweregrad/Emoji stammen aus dem Profil).
+function aiFindingsToMatches(findings) {
+  const byName = new Map(profileAllergens().map(a => [a.name.toLowerCase(), a]));
+  const out = [];
+  for (const f of findings) {
+    const a = byName.get((f.allergenName || "").toLowerCase());
+    if (a) out.push({ label: a.name, emoji: a.emoji, severity: a.severity, onlyTraces: f.onlyTraces });
+  }
+  return out;
+}
+
+// Lokale + KI-Treffer vereinen ("enthalten" schlägt "nur Spuren").
+function mergeMatches(local, ai) {
+  const byLabel = new Map();
+  for (const m of [...local, ...ai]) {
+    const ex = byLabel.get(m.label);
+    if (!ex || (!m.onlyTraces && ex.onlyTraces)) byLabel.set(m.label, m);
+  }
+  return [...byLabel.values()].sort((a, b) => (a.onlyTraces - b.onlyTraces) || (sev(b.severity).rank - sev(a.severity).rank));
+}
+
 // ----------------------- UI-Helfer -----------------------
 const $ = id => document.getElementById(id);
 const esc = s => { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; };
@@ -298,7 +337,7 @@ async function lookup(barcode) {
     const r = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(barcode)}.json?lc=de`);
     const j = await r.json();
     if (j.status === 1 && j.product) {
-      handleFoodProduct(j.product);
+      await handleFoodProduct(j.product);
     } else {
       // Schwester-Datenbanken: erkennt zumindest Kosmetik & Non-Food
       const fallbacks = [
@@ -329,18 +368,36 @@ async function lookup(barcode) {
   setLoading(false);
 }
 
-function handleFoodProduct(p) {
+async function handleFoodProduct(p) {
   setStatus("");
   const name = p.product_name_de || p.product_name || "Unbekanntes Produkt";
   const ingredients = p.ingredients_text_de || p.ingredients_text || "Keine Zutatenliste hinterlegt.";
+  const usable = hasUsableData(p);
+  let matches = [];
+  let viaAi = false;
+  if (usable) {
+    const text = (p.ingredients_text_de || p.ingredients_text || "");
+    matches = runCheck(text, p.allergens_tags || [], p.traces_tags || []);
+    // KI-Sicherheitsnetz: ist die Zutatenliste fremdsprachig (greifen die deutschen
+    // Stichwörter also nicht), prüft Gemini den Text zusätzlich und übersetzt selbst.
+    if (store.apiKey && hasAnyAllergy() && text.trim() && !looksGerman(text)) {
+      setStatus("🤖 Fremdsprachige Zutaten werden zusätzlich per KI geprüft ...");
+      try {
+        const findings = await analyzeAllergens(text, profileAllergens().map(a => a.name));
+        matches = mergeMatches(matches, aiFindingsToMatches(findings));
+        viaAi = true;
+      } catch (e) { /* KI nicht erreichbar -> lokales Ergebnis behalten */ }
+      setStatus("");
+    }
+  }
   let html = "";
-  if (!hasUsableData(p)) {
+  if (!usable) {
     html += `<div class="result" style="background:var(--grey)"><h3>❓ Keine Allergen-Daten vorhanden</h3>
       <p>Für dieses Produkt sind in der Datenbank keine verwertbaren Zutaten oder Allergene hinterlegt.
       Nutze „📝 Zutatenliste fotografieren“, um die Packung direkt zu prüfen.</p></div>`;
   } else {
-    const text = (p.ingredients_text_de || p.ingredients_text || "");
-    html += renderMatchesCard(runCheck(text, p.allergens_tags || [], p.traces_tags || []));
+    html += renderMatchesCard(matches);
+    if (viaAi) html += `<p class="muted">🤖 Fremdsprachige Zutatenliste automatisch per KI übersetzt und geprüft.</p>`;
   }
   const code = p.code || p._id || "";
   html += `<div class="card"><strong>${esc(name)}</strong><br><span class="muted">Zutaten:</span><pre>${esc(ingredients)}</pre></div>`;
@@ -350,7 +407,9 @@ function handleFoodProduct(p) {
   }
   $("resultArea").innerHTML = html;
   if (code) {
-    addToHistory(code, name, productStatus(p));
+    const status = !usable ? "nodata" : !hasAnyAllergy() ? "noprofile"
+      : !matches.length ? "ok" : matches.some(m => !m.onlyTraces) ? "danger" : "trace";
+    addToHistory(code, name, status);
     const btn = $("favProductBtn");
     if (btn) btn.onclick = () => { toggleFav(code); btn.textContent = store.history.some(e => e.code === code && e.fav) ? "⭐ In Favoriten" : "☆ Zu Favoriten hinzufügen"; };
   }
@@ -577,6 +636,53 @@ async function gemini(parts) {
   return j.candidates[0].content.parts[0].text;
 }
 
+// Prüft eine (auch fremdsprachige) Zutatenliste per KI gegen die übergebenen Allergen-Namen.
+// Gemini übersetzt selbst und erkennt Synonyme, versteckte Namen und E-Nummern.
+async function analyzeAllergens(text, allergenNames) {
+  if (!text || !text.trim() || !allergenNames.length) return [];
+  const prompt = "Du bist ein Assistent für Lebensmittelallergien. Es folgt eine Zutatenliste, " +
+    "die in einer beliebigen Sprache verfasst sein kann:\n---\n" + text + "\n---\n" +
+    "Der Nutzer reagiert auf folgende Allergene (deutsche Namen): " + allergenNames.join("; ") + "\n" +
+    "Prüfe für JEDES dieser Allergene, ob es in der Zutatenliste vorkommt. " +
+    "Berücksichtige Übersetzungen in alle Sprachen, Synonyme, versteckte Bezeichnungen, " +
+    "Fachbegriffe und E-Nummern. Unterscheide drei Fälle: \"enthalten\" (reguläre Zutat), " +
+    "\"spuren\" (nur Spuren-/Kann-Hinweis) oder \"nein\" (kommt nicht vor). " +
+    "Antworte AUSSCHLIESSLICH mit JSON, ohne Markdown und ohne Erklärung: " +
+    "[{\"allergen\":\"<exakter Name aus der Liste>\",\"status\":\"enthalten|spuren|nein\"}]";
+  return parseFindings(await gemini([{ text: prompt }]), allergenNames);
+}
+
+function parseFindings(raw, knownNames) {
+  const cleaned = (raw || "").trim().replace(/^```json/i, "").replace(/^```/, "").replace(/```$/, "").trim();
+  const start = cleaned.indexOf("["), end = cleaned.lastIndexOf("]");
+  if (start < 0 || end <= start) return [];
+  let arr;
+  try { arr = JSON.parse(cleaned.slice(start, end + 1)); } catch (e) { return []; }
+  if (!Array.isArray(arr)) return [];
+  const knownLower = knownNames.map(n => n.toLowerCase());
+  const seen = new Map();
+  for (const o of arr) {
+    if (!o || typeof o !== "object") continue;
+    const name = resolveName((o.allergen || "").toString(), knownNames, knownLower);
+    const status = (o.status || "").toString().trim().toLowerCase();
+    if (!name || (status !== "enthalten" && status !== "spuren")) continue;
+    const finding = { allergenName: name, onlyTraces: status === "spuren" };
+    const ex = seen.get(name);
+    if (!ex || (!finding.onlyTraces && ex.onlyTraces)) seen.set(name, finding);
+  }
+  return [...seen.values()];
+}
+
+// Ordnet einen von der KI zurückgegebenen Namen einem bekannten Profil-Allergen zu.
+function resolveName(returned, knownNames, knownLower) {
+  const r = returned.trim().toLowerCase();
+  if (!r) return null;
+  let i = knownLower.indexOf(r);
+  if (i >= 0) return knownNames[i];
+  i = knownLower.findIndex(k => r.includes(k) || k.includes(r));
+  return i >= 0 ? knownNames[i] : null;
+}
+
 async function photoSelected(file) {
   if (!store.apiKey) {
     setStatus("⚠️ Für den Foto-Scan wird ein Gemini API-Key benötigt (Profil → KI-Unterstützung). Kostenlos auf aistudio.google.com/apikey.");
@@ -592,8 +698,20 @@ async function photoSelected(file) {
     if (text.includes("KEINE_ZUTATEN")) {
       setStatus("⚠️ Die KI konnte keine Zutatenliste im Foto erkennen. Bitte die Zutatenliste flach und gut beleuchtet fotografieren.");
     } else {
+      let matches = runCheck(text, [], []);
+      let viaAi = false;
+      // Fremdsprachige Zutatenliste -> Gemini prüft zusätzlich (übersetzt + erkennt Synonyme).
+      if (store.apiKey && hasAnyAllergy() && !looksGerman(text)) {
+        setStatus("🤖 Fremdsprachige Zutaten werden zusätzlich per KI geprüft ...");
+        try {
+          const findings = await analyzeAllergens(text, profileAllergens().map(a => a.name));
+          matches = mergeMatches(matches, aiFindingsToMatches(findings));
+          viaAi = true;
+        } catch (e) { /* lokales Ergebnis behalten */ }
+      }
       setStatus("");
-      $("resultArea").innerHTML = renderMatchesCard(runCheck(text, [], [])) +
+      $("resultArea").innerHTML = renderMatchesCard(matches) +
+        (viaAi ? `<p class="muted">🤖 Fremdsprachige Zutatenliste automatisch per KI übersetzt und geprüft.</p>` : "") +
         `<div class="card"><span class="muted">🤖 Zutaten (per KI gelesen):</span><pre>${esc(text)}</pre></div>`;
     }
   } catch (e) {
@@ -721,9 +839,11 @@ function renderProfile() {
 function updateKeyStatus() {
   const k = store.apiKey;
   const wrong = k && (/curl|http/i.test(k) || k.length > 80);
+  const wrongFormat = k && !wrong && !k.startsWith("AIza");
   $("apiKeyStatus").textContent = !k
     ? "Ohne Key ist der Foto-Scan deaktiviert; Barcode-Scan funktioniert immer."
-    : wrong ? "⚠️ Das sieht nach mehr als nur dem Key aus — bitte nur den Schlüssel selbst kopieren (beginnt meist mit „AIza“)."
+    : wrong ? "⚠️ Das sieht nach mehr als nur dem Key aus — bitte nur den Schlüssel selbst kopieren (beginnt mit „AIza“)."
+    : wrongFormat ? "⚠️ Dieser Key beginnt nicht mit „AIza“ und wird von Google vermutlich abgelehnt. Bitte auf aistudio.google.com/apikey einen echten API-Schlüssel erstellen."
     : "✅ KI-Unterstützung aktiv";
 }
 
