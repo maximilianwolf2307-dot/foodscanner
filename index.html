@@ -90,7 +90,7 @@
   <div id="spinner" class="spinner" hidden></div>
   <div id="status" class="card" hidden></div>
   <div id="resultArea"></div>
-  <p class="muted" style="text-align:center;margin-top:28px">FoodScanner v1.6 · 17.06.2026</p>
+  <p class="muted" style="text-align:center;margin-top:28px">FoodScanner v1.7 · 17.06.2026</p>
 </main>
 
 <main id="profileView" hidden>
@@ -156,7 +156,7 @@ const CATALOG = [
   { id:"milk", name:"Milch / Laktose", emoji:"🥛", tags:["en:milk"], keywords:["milch","laktose","lactose","molke","butter","sahne","rahm","käse","joghurt","quark","kasein","casein","kaseinat","caseinat","laktalbumin","lactalbumin","laktoglobulin","schmand","kefir","mascarpone","ricotta","mozzarella","parmesan","gouda","feta","camembert","cheddar","emmentaler"], excl:["kakaobutter","sheabutter","kokosbutter","erdnussbutter","mandelbutter","cashewbutter","nussbutter","sonnenblumenbutter","samenbutter"] },
   { id:"eggs", name:"Ei", emoji:"🥚", tags:["en:eggs"], keywords:["eier","hühnerei","vollei","eigelb","eiklar","eipulver","eiweißpulver","ovalbumin","ovomucin","ovomucoid","lysozym","trockenei"] },
   { id:"peanuts", name:"Erdnüsse", emoji:"🥜", tags:["en:peanuts"], keywords:["erdnuss","erdnüsse","arachis"] },
-  { id:"nuts", name:"Schalenfrüchte (Nüsse)", emoji:"🌰", tags:["en:nuts"], keywords:["haselnuss","haselnüsse","mandel","walnuss","walnüsse","cashew","pistazie","macadamia","pekannuss","pekannüsse","pecannuss","pecannüsse","paranuss","paranüsse","marzipan","persipan","nougat","krokant"] },
+  { id:"nuts", name:"Schalenfrüchte (Nüsse)", emoji:"🌰", tags:["en:nuts"], keywords:["haselnuss","haselnüsse","mandel","walnuss","walnüsse","cashew","pistazie","macadamia","pekannuss","pekannüsse","pecannuss","pecannüsse","paranuss","paranüsse","marzipan","persipan","nougat","krokant","schalenfrüchte","schalenfrucht","nüsse"], excl:["erdnuss","erdnüsse","kokosnuss","kokosnüsse","muskatnuss","muskatnüsse","sheabutter"] },
   { id:"soy", name:"Soja", emoji:"🫘", tags:["en:soybeans"], keywords:["soja","tofu","tempeh","edamame","miso"] },
   { id:"fish", name:"Fisch", emoji:"🐟", tags:["en:fish"], keywords:["fisch","lachs","thunfisch","kabeljau","hering","sardelle","anchovis","sardine","makrele","forelle","scholle","dorsch","seehecht","surimi","pangasius","tilapia","rotbarsch"] },
   { id:"crustaceans", name:"Krebstiere", emoji:"🦐", tags:["en:crustaceans"], keywords:["krebstier","garnele","shrimp","krabbe","hummer","languste","scampi","krevette","krill","flusskrebs"] },
@@ -190,13 +190,22 @@ const store = {
 };
 let newSeverity = "ALLERGIE";
 
+// Vorkommen-Stufe: 2 = enthalten (rot, echte Zutat), 1 = kann enthalten (orange,
+// "Kann ... enthalten"/"may contain"), 0 = nur Spuren (gelb, "Kann Spuren von ...").
+const PRESENCE = {
+  2: { title: "⚠️ ACHTUNG — Allergene enthalten!", suffix: "", fixedColor: null },
+  1: { title: "⚠️ Kann Allergene enthalten", suffix: " (kann enthalten)", fixedColor: "#EF6C00" },
+  0: { title: "⚠️ Kann Spuren enthalten", suffix: " (nur Spuren)", fixedColor: "#F9A825" },
+};
+
 // ----------------------- Status & Verlauf -----------------------
 const STATUS = {
-  danger:   { dot: "#C62828", label: "Enthält deine Allergene" },
-  trace:    { dot: "#F9A825", label: "Kann Spuren enthalten" },
-  ok:       { dot: "#2E7D32", label: "Unbedenklich" },
-  nodata:   { dot: "#616161", label: "Keine Allergen-Daten" },
-  noprofile:{ dot: "#9BA897", label: "Kein Profil hinterlegt" },
+  danger:    { dot: "#C62828", label: "Enthält deine Allergene" },
+  maycontain:{ dot: "#EF6C00", label: "Kann Allergene enthalten" },
+  trace:     { dot: "#F9A825", label: "Kann Spuren enthalten" },
+  ok:        { dot: "#2E7D32", label: "Unbedenklich" },
+  nodata:    { dot: "#616161", label: "Keine Allergen-Daten" },
+  noprofile: { dot: "#9BA897", label: "Kein Profil hinterlegt" },
 };
 
 function productStatus(p) {
@@ -204,7 +213,8 @@ function productStatus(p) {
   if (!hasAnyAllergy()) return "noprofile";
   const matches = runCheck(p.ingredients_text_de || p.ingredients_text || "", p.allergens_tags || [], p.traces_tags || []);
   if (!matches.length) return "ok";
-  return matches.some(m => !m.onlyTraces) ? "danger" : "trace";
+  const maxLvl = Math.max(...matches.map(m => m.lvl));
+  return maxLvl === 2 ? "danger" : maxLvl === 1 ? "maycontain" : "trace";
 }
 
 function addToHistory(code, name, status) {
@@ -217,43 +227,52 @@ function addToHistory(code, name, status) {
 }
 
 // ----------------------- Prüf-Logik -----------------------
-function splitTraces(text) {
-  let idx = -1;
-  for (const m of TRACE_MARKERS) {
-    const i = text.indexOf(m);
-    if (i >= 0 && (idx === -1 || i < idx)) idx = i;
+// Teilt den Zutatentext in drei Zonen: Hauptzutaten, "Kann ... enthalten"-Hinweise
+// (vorsorgliche Kennzeichnung) und "Kann Spuren von ..."-Hinweise. Satzweise, damit
+// auch "Kann Schalenfrüchte enthalten" (Allergen zwischen Kann und enthalten) erkannt wird.
+function zoneText(text) {
+  const main = [], may = [], trace = [];
+  for (const s of (text || "").toLowerCase().split(/[.!\n;]+/)) {
+    if (!s.trim()) continue;
+    if (/spuren|traces of/.test(s)) trace.push(s);
+    else if (/may contain/.test(s) || /kann anteile/.test(s) ||
+             (/\bkann\b/.test(s) && /(enthalten|beinhalten)/.test(s))) may.push(s);
+    else main.push(s);
   }
-  return idx >= 0 ? [text.slice(0, idx), text.slice(idx)] : [text, ""];
+  return [main.join(" . "), may.join(" . "), trace.join(" . ")];
 }
 
 function runCheck(text, allergenTags, tracesTags) {
   const matches = [];
-  const [mainText, traceText] = splitTraces((text || "").toLowerCase());
+  const [mainText, mayText, traceText] = zoneText(text || "");
   const profile = store.profile;
+  const clean = (z, excl) => (excl || []).reduce((acc, ex) => acc.split(ex).join(" "), z);
   for (const def of CATALOG) {
     const severity = profile[def.id];
     if (!severity) continue;
-    // Ausschluss-Komposita (z. B. "kakaobutter") vor der Stichwortsuche entfernen
-    const cleanedMain = (def.excl || []).reduce((acc, ex) => acc.split(ex).join(" "), mainText);
-    const cleanedTrace = (def.excl || []).reduce((acc, ex) => acc.split(ex).join(" "), traceText);
-    const keywordInMain = def.keywords.some(k => cleanedMain.includes(k));
-    const keywordInTrace = def.keywords.some(k => cleanedTrace.includes(k));
+    const inMain = def.keywords.some(k => clean(mainText, def.excl).includes(k));
+    const inMay = def.keywords.some(k => clean(mayText, def.excl).includes(k));
+    const inTrace = def.keywords.some(k => clean(traceText, def.excl).includes(k));
     const tagInAllergens = def.tags.some(t => allergenTags.includes(t));
     const tagInTraces = def.tags.some(t => tracesTags.includes(t));
     // Zutatentext hat Vorrang vor den OFF-Tags (die Spuren teils auch als Allergen listen)
-    let onlyTraces = null;
-    if (keywordInMain) onlyTraces = false;
-    else if (keywordInTrace) onlyTraces = true;
-    else if (tagInTraces) onlyTraces = true;
-    else if (tagInAllergens) onlyTraces = false;
-    if (onlyTraces !== null) matches.push({ label: def.name, emoji: def.emoji, severity, onlyTraces });
+    let lvl = null;
+    if (inMain) lvl = 2;
+    else if (inMay) lvl = 1;
+    else if (inTrace) lvl = 0;
+    else if (tagInTraces) lvl = 0;       // OFF traces_tags = "kann enthalten/Spuren"
+    else if (tagInAllergens) lvl = 2;
+    if (lvl !== null) matches.push({ label: def.name, emoji: def.emoji, severity, lvl });
   }
   for (const c of store.customs) {
     const kws = [c.name, ...(c.keywords || [])].map(k => k.toLowerCase());
-    if (kws.some(k => mainText.includes(k))) matches.push({ label: c.name, emoji: "❗", severity: c.severity, onlyTraces: false });
-    else if (kws.some(k => traceText.includes(k))) matches.push({ label: c.name, emoji: "❗", severity: c.severity, onlyTraces: true });
+    let lvl = null;
+    if (kws.some(k => mainText.includes(k))) lvl = 2;
+    else if (kws.some(k => mayText.includes(k))) lvl = 1;
+    else if (kws.some(k => traceText.includes(k))) lvl = 0;
+    if (lvl !== null) matches.push({ label: c.name, emoji: "❗", severity: c.severity, lvl });
   }
-  return matches.sort((a, b) => (a.onlyTraces - b.onlyTraces) || (sev(b.severity).rank - sev(a.severity).rank));
+  return matches.sort((a, b) => (b.lvl - a.lvl) || (sev(b.severity).rank - sev(a.severity).rank));
 }
 
 function hasUsableData(p) {
@@ -292,19 +311,19 @@ function aiFindingsToMatches(findings) {
   const out = [];
   for (const f of findings) {
     const a = byName.get((f.allergenName || "").toLowerCase());
-    if (a) out.push({ label: a.name, emoji: a.emoji, severity: a.severity, onlyTraces: f.onlyTraces });
+    if (a) out.push({ label: a.name, emoji: a.emoji, severity: a.severity, lvl: f.lvl });
   }
   return out;
 }
 
-// Lokale + KI-Treffer vereinen ("enthalten" schlägt "nur Spuren").
+// Lokale + KI-Treffer vereinen (höhere Vorkommen-Stufe gewinnt).
 function mergeMatches(local, ai) {
   const byLabel = new Map();
   for (const m of [...local, ...ai]) {
     const ex = byLabel.get(m.label);
-    if (!ex || (!m.onlyTraces && ex.onlyTraces)) byLabel.set(m.label, m);
+    if (!ex || m.lvl > ex.lvl) byLabel.set(m.label, m);
   }
-  return [...byLabel.values()].sort((a, b) => (a.onlyTraces - b.onlyTraces) || (sev(b.severity).rank - sev(a.severity).rank));
+  return [...byLabel.values()].sort((a, b) => (b.lvl - a.lvl) || (sev(b.severity).rank - sev(a.severity).rank));
 }
 
 // ----------------------- UI-Helfer -----------------------
@@ -321,12 +340,13 @@ function renderMatchesCard(matches) {
     return `<div class="result" style="background:var(--green)"><h3>✅ Keines deiner Allergene gefunden</h3>
       <p style="opacity:.9;font-size:.82rem">Ohne Gewähr — im Zweifel immer zusätzlich das Etikett prüfen.</p></div>`;
   }
-  const worst = matches.find(m => !m.onlyTraces);
-  const color = worst ? sev(worst.severity).color : "var(--yellow)";
-  const title = worst ? "⚠️ ACHTUNG — Allergene enthalten!" : "⚠️ Kann Spuren enthalten";
+  const maxLvl = Math.max(...matches.map(m => m.lvl));
+  const pres = PRESENCE[maxLvl];
+  // Bei "enthalten" (Stufe 2) die Farbe vom schwersten Allergen; sonst feste Orange/Gelb.
+  const color = pres.fixedColor || sev(matches.find(m => m.lvl === 2).severity).color;
   const items = matches.map(m =>
-    `<li>${m.emoji} ${esc(m.label)} — ${sev(m.severity).label}${m.onlyTraces ? " (nur Spuren möglich)" : ""}</li>`).join("");
-  return `<div class="result" style="background:${color}"><h3>${title}</h3><ul style="margin:6px 0;padding-left:18px">${items}</ul></div>`;
+    `<li>${m.emoji} ${esc(m.label)} — ${sev(m.severity).label}${PRESENCE[m.lvl].suffix}</li>`).join("");
+  return `<div class="result" style="background:${color}"><h3>${pres.title}</h3><ul style="margin:6px 0;padding-left:18px">${items}</ul></div>`;
 }
 
 // ----------------------- Produkt-Lookup -----------------------
@@ -408,8 +428,9 @@ async function handleFoodProduct(p) {
   }
   $("resultArea").innerHTML = html;
   if (code) {
+    const maxLvl = matches.length ? Math.max(...matches.map(m => m.lvl)) : -1;
     const status = !usable ? "nodata" : !hasAnyAllergy() ? "noprofile"
-      : !matches.length ? "ok" : matches.some(m => !m.onlyTraces) ? "danger" : "trace";
+      : maxLvl < 0 ? "ok" : maxLvl === 2 ? "danger" : maxLvl === 1 ? "maycontain" : "trace";
     addToHistory(code, name, status);
     const btn = $("favProductBtn");
     if (btn) btn.onclick = () => { toggleFav(code); btn.textContent = store.history.some(e => e.code === code && e.fav) ? "⭐ In Favoriten" : "☆ Zu Favoriten hinzufügen"; };
@@ -661,10 +682,17 @@ async function analyzeAllergens(text, allergenNames) {
     "Der Nutzer reagiert auf folgende Allergene (deutsche Namen): " + allergenNames.join("; ") + "\n" +
     "Prüfe für JEDES dieser Allergene, ob es in der Zutatenliste vorkommt. " +
     "Berücksichtige Übersetzungen in alle Sprachen, Synonyme, versteckte Bezeichnungen, " +
-    "Fachbegriffe und E-Nummern. Unterscheide drei Fälle: \"enthalten\" (reguläre Zutat), " +
-    "\"spuren\" (nur Spuren-/Kann-Hinweis) oder \"nein\" (kommt nicht vor). " +
+    "Fachbegriffe und E-Nummern. Unterscheide VIER Fälle:\n" +
+    "- \"enthalten\": als reguläre Zutat enthalten\n" +
+    "- \"kann_enthalten\": NUR in einem vorsorglichen Hinweis 'Kann ... enthalten' / 'May contain ...' genannt\n" +
+    "- \"spuren\": NUR in einem Spuren-Hinweis 'Kann Spuren von ... enthalten' / 'May contain traces of ...'\n" +
+    "- \"nein\": kommt nicht vor\n" +
+    "WICHTIG zu Schalenfrüchten/Nüssen: Als Schalenfrucht zählen AUSSCHLIESSLICH Mandel, Haselnuss, " +
+    "Walnuss, Cashew, Pekannuss, Paranuss, Pistazie und Macadamia. KEINE Schalenfrucht (NICHT melden) sind: " +
+    "Sheabutter/Karité/shea, Kokos/coconut, Muskatnuss/nutmeg, Pinienkerne. Erdnuss ist ein eigenes Allergen. " +
+    "Melde ein Allergen nur, wenn es eindeutig vorkommt — erfinde nichts und rate nicht.\n" +
     "Antworte AUSSCHLIESSLICH mit JSON, ohne Markdown und ohne Erklärung: " +
-    "[{\"allergen\":\"<exakter Name aus der Liste>\",\"status\":\"enthalten|spuren|nein\"}]";
+    "[{\"allergen\":\"<exakter Name aus der Liste>\",\"status\":\"enthalten|kann_enthalten|spuren|nein\"}]";
   return parseFindings(await gemini([{ text: prompt }]), allergenNames);
 }
 
@@ -676,15 +704,16 @@ function parseFindings(raw, knownNames) {
   try { arr = JSON.parse(cleaned.slice(start, end + 1)); } catch (e) { return []; }
   if (!Array.isArray(arr)) return [];
   const knownLower = knownNames.map(n => n.toLowerCase());
+  const lvlOf = { enthalten: 2, kann_enthalten: 1, spuren: 0 };
   const seen = new Map();
   for (const o of arr) {
     if (!o || typeof o !== "object") continue;
     const name = resolveName((o.allergen || "").toString(), knownNames, knownLower);
     const status = (o.status || "").toString().trim().toLowerCase();
-    if (!name || (status !== "enthalten" && status !== "spuren")) continue;
-    const finding = { allergenName: name, onlyTraces: status === "spuren" };
+    if (!name || !(status in lvlOf)) continue;
+    const finding = { allergenName: name, lvl: lvlOf[status] };
     const ex = seen.get(name);
-    if (!ex || (!finding.onlyTraces && ex.onlyTraces)) seen.set(name, finding);
+    if (!ex || finding.lvl > ex.lvl) seen.set(name, finding);
   }
   return [...seen.values()];
 }
